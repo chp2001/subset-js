@@ -97,15 +97,6 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
     <p>Click a catchment on the map or enter an ID. Upstream network is auto-selected, then download a subset GeoPackage.</p>
   </header>
   <div id="controls">
-    <!--Add benchmark button-->
-    <div class="btn-row">
-      <button id="btn-shortcuts">Precompute Subset Shortcuts</button>
-      <button id="btn-shortcuts-2">Precompute Subset Shortcuts 2</button>
-    </div>
-    <div class="btn-row">
-      <button id="btn-benchmark">Run Selection Benchmark</button>
-      <button id="btn-shortcut-benchmark">Run Shortcut Benchmark</button>
-    </div>
     <div class="field">
       <label>Catchment ID</label>
       <input id="input-catid" type="text" placeholder="e.g. cat-486931" spellcheck="false"/>
@@ -989,24 +980,6 @@ async function buildGeoPackage(tableData) {
   return new Blob([data], { type: 'application/geopackage+sqlite3' });
 }
 
-function __traverse(catId, includeOutlet = false) {
-  // unused variant of traverse function that can imitate the original getUpstreamIds logic more directly
-  if (includeOutlet) {
-    const downstreamId = downstream.get(catId);
-    if (downstreamId != null) return traverse(downstreamId, false);
-  }
-  /** @type {Set<number>} */
-  const parents = adjacency.get(catId);
-  if (!parents || parents.size === 0) {
-    return [];
-  }
-  const allUpstreams = [];
-  for (const p of parents) {
-    allUpstreams.push(p, ...traverse(p, false));
-  }
-  return allUpstreams;
-}
-
 /**
  * @template T,K
  * @param {Map<T,K>} map - the Map to query
@@ -1031,72 +1004,6 @@ function getUpstreamCountsArr(catIds, upstreamsMap) {
     countsArr.push(upstreams.length);
   }
   return countsArr;
-}
-
-/**
- * @param {number} catId - numeric catchment ID to traverse upstream from
- * @param {Map<number, number[]>} upstreamsMap - Map of catchment ID to its upstream catchment IDs
- * @returns {number[]} - array of upstream catchment IDs for the given catchment ID
- */
-function upstreamTraverse(catId, upstreamsMap) {
-  if (upstreamsMap.has(catId)) return mapGetForced(upstreamsMap, catId);
-  /** @type {Set<number>} */
-  const parents = adjacency.get(catId);
-  if (!parents || parents.size === 0) {
-    upstreamsMap.set(catId, []); // Storing empty array allows the redundant skip
-    return [];
-  }
-  const allUpstreams = [];
-  for (const p of parents) {
-    allUpstreams.push(p, ...upstreamTraverse(p, upstreamsMap));
-  }
-  upstreamsMap.set(catId, allUpstreams);
-  return allUpstreams;
-}
-
-/**
- * @param {number} startCatId - numeric catchment ID to start traversal from
- * @param {Map<number, number[]>} upstreamsMap - Map of catchment ID to its upstream catchment IDs
- * @returns {number[]} - array of numeric catchment IDs in the order they were traversed upstream from the starting catchment ID
- */
-function upstreamTraverseIter(startCatId, upstreamsMap) {
-  // Non-recursive variant of upstreamTraverse to bypass call stack limits
-  const result = [startCatId];
-  var curId = startCatId;
-  const stack = [curId];
-  // Store a depth-first traversal in result
-  while (stack.length > 0) {
-    curId = stack.pop();
-    if (upstreamsMap.has(curId)) {
-      result.push(...mapGetForced(upstreamsMap, curId));
-      continue;
-    }
-    const parents = adjacency.get(curId);
-    if (!parents || parents.size === 0) {
-      upstreamsMap.set(curId, []); // Storing empty array allows the redundant skip
-      continue;
-    }
-    result.push(...parents);
-    stack.push(...parents);
-  }
-  // Reverse back up the result to add the subgroups to the upstreamsMap
-  for (let i = result.length - 1; i >= 0; i--) {
-    const catId = result[i];
-    const parents = adjacency.get(catId);
-    if (!parents || parents.size === 0) {
-      upstreamsMap.set(catId, []); // Storing empty array allows the redundant skip
-    } else {
-      var upstreams = [];
-      for (const p of parents) {
-        // upstreams.push(p, ...(upstreamsMap.get(p) || []));
-        // call stack issues...?
-        upstreams.push(p);
-        upstreams = upstreams.concat(mapGetForced(upstreamsMap, p));
-      }
-      upstreamsMap.set(catId, upstreams);
-    }
-  }
-  return result;
 }
 
 function checkCount(arr, index) {
@@ -1159,37 +1066,8 @@ function verifyShortcutPartition(orderedIds, upstreamCounts) {
  * @param {boolean} optimizeOrder - whether to optimize the order of the upstream catchments for faster outlet selection (default: false)
  * @returns {ShortcutPartition} - ordered list of numeric catchment IDs and their upstream counts for the outlet's upstream subset, optimized for faster outlet selection
  */
-function prepareShortcutOrder(outletNumeric, optimizeOrder = false) {
-  // Run a variant of the getUpstreamIds traversal that collects useful data along the way
-  /** @type {Map<number, number[]>} */
-  const foundUpstreams = new Map(); // Map of catchment ID to its upstream catchment IDs
-  // upstreamTraverse(outletNumeric, foundUpstreams);
-  /**
-   * upstreamTraverseIter sets the foundUpstreams map with the sets of upstream catchments for each catchment in the traversal.
-   * It returns an ordered list of catchment IDs in order of DFS, but we don't use that?
-   */
-  upstreamTraverseIter(outletNumeric, foundUpstreams);
-  /**
-   * Then we set outletUpstreams to the list of upstream catchments for outletNumeric... which is also the return of the traversal..
-   * Don't know why we would get it from the map instead of just using it directly.
-   */
-  const outletUpstreams = mapGetForced(foundUpstreams, outletNumeric);
-  /**
-   * Then we return the outletUpstreams and the corresponding upstream counts for each catchment.
-   */
-  return {
-    orderedIds: outletUpstreams,
-    upstreamCounts: getUpstreamCountsArr(outletUpstreams, foundUpstreams),
-  };
-}
-
-/**
- * @param {number} outletNumeric - numeric ID of the outlet catchment
- * @param {boolean} optimizeOrder - whether to optimize the order of the upstream catchments for faster outlet selection (default: false)
- * @returns {ShortcutPartition} - ordered list of numeric catchment IDs and their upstream counts for the outlet's upstream subset, optimized for faster outlet selection
- */
-function upstreamTraverseIter2(outletNumeric, optimizeOrder = false) {
-  // Variant of upstreamTraverseIter that builds the ordered list and counts in a single pass
+function upstreamTraverseIter(outletNumeric, optimizeOrder = false) {
+  // optimizeOrder currently unimplemented, but might be used later.
   const orderedIds = [];
   const upstreamCounts = [];
   const countMap = new Map(); // Map of catchment ID to its upstream count, built in reverse pass
@@ -1229,12 +1107,12 @@ function upstreamTraverseIter2(outletNumeric, optimizeOrder = false) {
  * @param {boolean} optimizeOrder - whether to optimize the order of the upstream catchments for faster outlet selection (default: false)
  * @returns {ShortcutPartition} - ordered list of numeric catchment IDs and their upstream counts for the outlet's upstream subset, optimized for faster outlet selection
  */
-function prepareShortcutOrder2(outletNumeric, optimizeOrder = false) {
+function prepareShortcutOrder(outletNumeric, optimizeOrder = false) {
   // Run a variant of the getUpstreamIds traversal that collects useful data along the way
-  return upstreamTraverseIter2(outletNumeric);
+  return upstreamTraverseIter(outletNumeric);
 }
 
-async function prepareSubsetShortcut(useMethod2 = false) {
+async function prepareSubsetShortcut() {
   // Prepare the global shortcutIndexArray and shortcutIndexMap for faster outlet selection.
   // Use the same infrastructure as getUpstreamIds to do graph traversal
   // Need to be somewhat careful here, as memory usage can cause issues if we aren't careful.
@@ -1258,41 +1136,15 @@ async function prepareSubsetShortcut(useMethod2 = false) {
   const t1 = performance.now();
   log(`  Found ${deadEnds.length} dead-end catchments to start traversal (${(t1-t0).toFixed(0)}ms)`, 'info');
 
-  // For functionality testing:
-  // const testOutlet = 2145462;
-  const testOutlet = 819525;
-  // prepareShortcutOrder(testOutlet);
-  // if (useMethod2) {
-  //   const testResult = prepareShortcutOrder2(testOutlet);
-  // } else {
-  //   const testResult = prepareShortcutOrder(testOutlet);
-  // }
-  const testResult = useMethod2 ? prepareShortcutOrder2(testOutlet) : prepareShortcutOrder(testOutlet);
-  const t2 = performance.now();
-  log(`  Prepared shortcut order for test outlet ${testOutlet} with ${testResult.orderedIds.length} upstreams (${(t2-t1).toFixed(0)}ms)`, 'info');
-  const verificationPassed = verifyShortcutPartition(testResult.orderedIds, testResult.upstreamCounts);
-  if (!verificationPassed) {
-    log('  Shortcut partition verification failed for test outlet. Check logs for details.', 'error');
-  } else {
-    log('  Shortcut partition verification passed for test outlet.', 'success');
-  }
-
   const totalCatchments = adjacency.size;
   // Build shortcut index array and map
   const t3 = performance.now();
   const progressInterval = 5*1000; // Log progress every 5 seconds
   let lastProgressTime = t3;
   for (const catId of deadEnds) {
-    // if (useMethod2) {
-    //   const result = prepareShortcutOrder2(catId);
-    // } else {
-    //   const result = prepareShortcutOrder(catId);
-    // }
-    const result = useMethod2 ? prepareShortcutOrder2(catId) : prepareShortcutOrder(catId);
+    const result = prepareShortcutOrder(catId);
     const startIndex = shortcutIndexToUpstreamsArray.length;
-    // shortcutIndexToUpstreamsArray.push(...result.upstreamCounts);
     shortcutIndexToUpstreamsArray = shortcutIndexToUpstreamsArray.concat(result.upstreamCounts);
-    // shortcutIndexToIdArray.push(...result.orderedIds);
     shortcutIndexToIdArray = shortcutIndexToIdArray.concat(result.orderedIds);
     for (let i = 0; i < result.orderedIds.length; i++) {
       const id = result.orderedIds[i];
@@ -1310,8 +1162,6 @@ async function prepareSubsetShortcut(useMethod2 = false) {
         const estimatedRemainingTime = (remainingCatchments * avgTimePerCatchment) / 1000;
         log(`  Estimated remaining time: ${estimatedRemainingTime.toFixed(2)} seconds for ${remainingCatchments}/${totalCatchments} (${((shortcutIdToIndexMap.size/totalCatchments)*100).toFixed(2)}%) catchments at approx. ${avgTimePerCatchment.toFixed(2)} ms/catchment`, 'info');
       }
-      
-      
       // Let the UI breathe to update logs and avoid blocking for too long during this potentially lengthy process
       await new Promise(resolve => setTimeout(resolve, 100));
     }
@@ -1326,109 +1176,6 @@ async function prepareSubsetShortcut(useMethod2 = false) {
   } else {
     log(`  Shortcut index array and map sizes are consistent: ${shortcutIdToIndexMap.size} entries`, 'success');
   }
-}
-
-async function selectOutletBenchmark() {
-  let timeLimitSeconds = 30;
-  let timeLimit = timeLimitSeconds * 1000;
-  let timeLogIntervalSeconds = 5; // Log progress every N seconds
-  let timeLogInterval = timeLogIntervalSeconds * 1000;
-  let lastLogTime = performance.now();
-  // Benchmark current subset selection logic by running selectOutlet on the entire dataset and collecting relevant data
-  const allCatIds = Array.from(adjacency.keys()).map(n => `cat-${n}`);
-  const results = [];
-  var totalStats = {
-    totalTime: 0, // Sum of time taken for each selectOutlet call
-    totalCatchments: 0, // Count of times selectOutlet was called (should equal total number of catchments)
-    totalUpstreams: 0, // Sum of counts of selected upstream catchments across all calls
-  }
-  function simSelectOutlet(catId) {
-    // Run the selectOutlet logic without included map updates or excessive logging to isolate the core selection performance
-    const startTime = performance.now();
-    let numeric = parseInt(catId.split('-')[1]);
-    let upstreamIds = getUpstreamIds(numeric, true);
-    const endTime = performance.now();
-    const timeTaken = endTime - startTime;
-    totalStats.totalTime += timeTaken;
-    totalStats.totalCatchments += 1;
-    totalStats.totalUpstreams += upstreamIds.size;
-    results.push({ catId, timeTaken, upstreamCount: upstreamIds.size });
-  }
-  for (const catId of allCatIds) {
-    simSelectOutlet(catId);
-    const now = performance.now();
-    if (now - lastLogTime >= timeLogInterval) {
-      const timeElapsed = (totalStats.totalTime / 1000).toFixed(2);
-      const avgTime = totalStats.totalTime / totalStats.totalCatchments;
-      const avgUpstreams = totalStats.totalUpstreams / totalStats.totalCatchments;
-      log(`Benchmark progress: ${totalStats.totalCatchments}/${allCatIds.length} catchments processed at time ${timeElapsed}s. Avg time: ${avgTime.toFixed(2)} ms, Avg upstreams: ${avgUpstreams.toFixed(2)}`, 'info');
-      lastLogTime = now;
-      // let the UI breathe a bit to update logs and avoid blocking for too long during the benchmark
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    if (totalStats.totalTime >= timeLimit) {
-      log(`Benchmark time limit of ${timeLimitSeconds} seconds reached. Processed ${totalStats.totalCatchments} catchments. Avg time: ${(totalStats.totalTime / totalStats.totalCatchments).toFixed(2)} ms, Avg upstreams: ${(totalStats.totalUpstreams / totalStats.totalCatchments).toFixed(2)}`, 'warning');
-      break;
-    }
-  }
-  const t1 = performance.now();
-  const totalTimeSeconds = (t1 - t0) / 1000;
-  log(`Completed selectOutlet benchmark for ${totalStats.totalCatchments} catchments in ${totalTimeSeconds.toFixed(2)} seconds. Avg time: ${(totalStats.totalTime / totalStats.totalCatchments).toFixed(2)} ms, Avg upstreams: ${(totalStats.totalUpstreams / totalStats.totalCatchments).toFixed(2)}`, 'success');
-  log(`Time from results vs external timer: ${(totalStats.totalTime / 1000).toFixed(2)} seconds (internal) vs ${totalTimeSeconds.toFixed(2)} seconds (external)`, 'info');
-}
-
-async function selectOutletShortcutBenchmark() {
-  if (shortcutIndexToUpstreamsArray.length === 0 || shortcutIdToIndexMap.size === 0) {
-    log('Shortcut index not prepared. Please run prepareSubsetShortcut() before benchmarking the selectOutletShortcut performance.', 'error');
-    return;
-  }
-  const timeLimitSeconds = 30;
-  const timeLimit = timeLimitSeconds * 1000;
-  const timeLogIntervalSeconds = 5; // Log progress every N seconds
-  const timeLogInterval = timeLogIntervalSeconds * 1000;
-  let lastLogTime = performance.now();
-  // Benchmark the selectOutletShortcut logic to compare performance against the original selectOutlet and validate the shortcut index
-  const allCatIds = Array.from(adjacency.keys()).map(n => `cat-${n}`);
-  const results = [];
-  var totalStats = {
-    totalTime: 0, // Sum of time taken for each selectOutletShortcut call
-    totalCatchments: 0, // Count of times selectOutletShortcut was called (should equal total number of catchments)
-    totalUpstreams: 0, // Sum of counts of selected upstream catchments across all calls
-  }
-  function simSelectOutletShortcut(catId) {
-    // Run the selectOutletShortcut logic without included map updates or excessive logging to isolate the core selection performance
-    const startTime = performance.now();
-    let numeric = parseInt(catId.split('-')[1]);
-    let upstreamIds = getUpstreamIdsShortcut(numeric);
-    const endTime = performance.now();
-    const timeTaken = endTime - startTime;
-    totalStats.totalTime += timeTaken;
-    totalStats.totalCatchments += 1;
-    totalStats.totalUpstreams += upstreamIds.size;
-    results.push({ catId, timeTaken, upstreamCount: upstreamIds.size });
-  }
-  const t0 = performance.now();
-  for (const catId of allCatIds) {
-    simSelectOutletShortcut(catId);
-    const now = performance.now();
-    if (now - lastLogTime >= timeLogInterval) {
-      const timeElapsed = (totalStats.totalTime / 1000).toFixed(2);
-      const avgTime = totalStats.totalTime / totalStats.totalCatchments;
-      const avgUpstreams = totalStats.totalUpstreams / totalStats.totalCatchments;
-      log(`Shortcut benchmark progress: ${totalStats.totalCatchments}/${allCatIds.length} catchments processed at time ${timeElapsed}s. Avg time: ${avgTime.toFixed(2)} ms, Avg upstreams: ${avgUpstreams.toFixed(2)}`, 'info');
-      lastLogTime = now;
-      // let the UI breathe a bit to update logs and avoid blocking for too long during the benchmark
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    if (totalStats.totalTime >= timeLimit) {
-      log(`Shortcut benchmark time limit of ${timeLimitSeconds} seconds reached. Processed ${totalStats.totalCatchments} catchments. Avg time: ${(totalStats.totalTime / totalStats.totalCatchments).toFixed(2)} ms, Avg upstreams: ${(totalStats.totalUpstreams / totalStats.totalCatchments).toFixed(2)}`, 'warning');
-      break;
-    }
-  }
-  const t1 = performance.now();
-  const totalTimeSeconds = (t1 - t0) / 1000;
-  log(`Completed selectOutletShortcut benchmark for ${totalStats.totalCatchments} catchments in ${totalTimeSeconds.toFixed(2)} seconds. Avg time: ${(totalStats.totalTime / totalStats.totalCatchments).toFixed(2)} ms, Avg upstreams: ${(totalStats.totalUpstreams / totalStats.totalCatchments).toFixed(2)}`, 'success');
-  log(`Time from results vs external timer: ${(totalStats.totalTime / 1000).toFixed(2)} seconds (internal) vs ${totalTimeSeconds.toFixed(2)} seconds (external)`, 'info');
 }
 
 // ============================================================
@@ -1488,19 +1235,6 @@ document.getElementById('btn-clear').addEventListener('click', () => {
   logEl.innerHTML = '';
   setProgress(0);
 });
-// Add benchmark listener
-document.getElementById('btn-benchmark').addEventListener('click', () => {
-  selectOutletBenchmark();
-});
-document.getElementById('btn-shortcut-benchmark').addEventListener('click', () => {
-  selectOutletShortcutBenchmark();
-});
-document.getElementById('btn-shortcuts').addEventListener('click', () => {
-  prepareSubsetShortcut(false);
-});
-document.getElementById('btn-shortcuts-2').addEventListener('click', () => {
-  prepareSubsetShortcut(true);
-});
 
 // ============================================================
 // BOOT
@@ -1509,6 +1243,7 @@ document.getElementById('btn-shortcuts-2').addEventListener('click', () => {
   initMap();
   try {
     await loadNetworkGraph();
+    await prepareSubsetShortcut();
     log('Ready. Zoom in and click a catchment, or type an ID.', 'success');
   } catch (err) {
     log(`Init error: ${err.message}`, 'error');
