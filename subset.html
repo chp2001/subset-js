@@ -99,9 +99,12 @@ button{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:var
   <div id="controls">
     <!--Add benchmark button-->
     <div class="btn-row">
+      <button id="btn-shortcuts">Precompute Subset Shortcuts</button>
+      <button id="btn-shortcuts-2">Precompute Subset Shortcuts 2</button>
+    </div>
+    <div class="btn-row">
       <button id="btn-benchmark">Run Selection Benchmark</button>
       <button id="btn-shortcut-benchmark">Run Shortcut Benchmark</button>
-      <button id="btn-shortcuts">Precompute Subset Shortcuts</button>
     </div>
     <div class="field">
       <label>Catchment ID</label>
@@ -1061,6 +1064,7 @@ function upstreamTraverseIter(startCatId, upstreamsMap) {
   const result = [startCatId];
   var curId = startCatId;
   const stack = [curId];
+  // Store a depth-first traversal in result
   while (stack.length > 0) {
     curId = stack.pop();
     if (upstreamsMap.has(curId)) {
@@ -1160,15 +1164,77 @@ function prepareShortcutOrder(outletNumeric, optimizeOrder = false) {
   /** @type {Map<number, number[]>} */
   const foundUpstreams = new Map(); // Map of catchment ID to its upstream catchment IDs
   // upstreamTraverse(outletNumeric, foundUpstreams);
+  /**
+   * upstreamTraverseIter sets the foundUpstreams map with the sets of upstream catchments for each catchment in the traversal.
+   * It returns an ordered list of catchment IDs in order of DFS, but we don't use that?
+   */
   upstreamTraverseIter(outletNumeric, foundUpstreams);
+  /**
+   * Then we set outletUpstreams to the list of upstream catchments for outletNumeric... which is also the return of the traversal..
+   * Don't know why we would get it from the map instead of just using it directly.
+   */
   const outletUpstreams = mapGetForced(foundUpstreams, outletNumeric);
+  /**
+   * Then we return the outletUpstreams and the corresponding upstream counts for each catchment.
+   */
   return {
     orderedIds: outletUpstreams,
     upstreamCounts: getUpstreamCountsArr(outletUpstreams, foundUpstreams),
   };
 }
 
-async function prepareSubsetShortcut() {
+/**
+ * @param {number} outletNumeric - numeric ID of the outlet catchment
+ * @param {boolean} optimizeOrder - whether to optimize the order of the upstream catchments for faster outlet selection (default: false)
+ * @returns {ShortcutPartition} - ordered list of numeric catchment IDs and their upstream counts for the outlet's upstream subset, optimized for faster outlet selection
+ */
+function upstreamTraverseIter2(outletNumeric, optimizeOrder = false) {
+  // Variant of upstreamTraverseIter that builds the ordered list and counts in a single pass
+  const orderedIds = [];
+  const upstreamCounts = [];
+  const countMap = new Map(); // Map of catchment ID to its upstream count, built in reverse pass
+  var curId = outletNumeric;
+  const stack = [curId];
+  while (stack.length > 0) {
+    curId = stack.pop();
+    orderedIds.push(curId);
+    const parents = adjacency.get(curId);
+    if (!parents || parents.size === 0) {
+      continue;
+    }
+    stack.push(...parents);
+  }
+  // Reverse DFS to add the counts in a single pass
+  for (let i = orderedIds.length - 1; i >= 0; i--) {
+    const catId = orderedIds[i];
+    const parents = adjacency.get(catId);
+    if (parents && parents.size > 0) {
+      let count = 0;
+      for (const p of parents) {
+        count += 1 + (countMap.get(p) || 0); // Count the direct parent + its upstream count from the map
+      }
+      countMap.set(catId, count);
+    }
+    upstreamCounts.push(countMap.get(catId) || 0);
+  }
+  upstreamCounts.reverse(); // Reverse back to match the order of orderedIds
+  return {
+    orderedIds,
+    upstreamCounts,
+  };
+}
+
+/**
+ * @param {number} outletNumeric - numeric ID of the outlet catchment
+ * @param {boolean} optimizeOrder - whether to optimize the order of the upstream catchments for faster outlet selection (default: false)
+ * @returns {ShortcutPartition} - ordered list of numeric catchment IDs and their upstream counts for the outlet's upstream subset, optimized for faster outlet selection
+ */
+function prepareShortcutOrder2(outletNumeric, optimizeOrder = false) {
+  // Run a variant of the getUpstreamIds traversal that collects useful data along the way
+  return upstreamTraverseIter2(outletNumeric);
+}
+
+async function prepareSubsetShortcut(useMethod2 = false) {
   // Prepare the global shortcutIndexArray and shortcutIndexMap for faster outlet selection.
   // Use the same infrastructure as getUpstreamIds to do graph traversal
   // Need to be somewhat careful here, as memory usage can cause issues if we aren't careful.
@@ -1196,7 +1262,12 @@ async function prepareSubsetShortcut() {
   // const testOutlet = 2145462;
   const testOutlet = 819525;
   // prepareShortcutOrder(testOutlet);
-  var testResult = prepareShortcutOrder(testOutlet);
+  // if (useMethod2) {
+  //   const testResult = prepareShortcutOrder2(testOutlet);
+  // } else {
+  //   const testResult = prepareShortcutOrder(testOutlet);
+  // }
+  const testResult = useMethod2 ? prepareShortcutOrder2(testOutlet) : prepareShortcutOrder(testOutlet);
   const t2 = performance.now();
   log(`  Prepared shortcut order for test outlet ${testOutlet} with ${testResult.orderedIds.length} upstreams (${(t2-t1).toFixed(0)}ms)`, 'info');
   const verificationPassed = verifyShortcutPartition(testResult.orderedIds, testResult.upstreamCounts);
@@ -1212,7 +1283,12 @@ async function prepareSubsetShortcut() {
   const progressInterval = 5*1000; // Log progress every 5 seconds
   let lastProgressTime = t3;
   for (const catId of deadEnds) {
-    const result = prepareShortcutOrder(catId);
+    // if (useMethod2) {
+    //   const result = prepareShortcutOrder2(catId);
+    // } else {
+    //   const result = prepareShortcutOrder(catId);
+    // }
+    const result = useMethod2 ? prepareShortcutOrder2(catId) : prepareShortcutOrder(catId);
     const startIndex = shortcutIndexToUpstreamsArray.length;
     // shortcutIndexToUpstreamsArray.push(...result.upstreamCounts);
     shortcutIndexToUpstreamsArray = shortcutIndexToUpstreamsArray.concat(result.upstreamCounts);
@@ -1295,6 +1371,10 @@ async function selectOutletBenchmark() {
       break;
     }
   }
+  const t1 = performance.now();
+  const totalTimeSeconds = (t1 - t0) / 1000;
+  log(`Completed selectOutlet benchmark for ${totalStats.totalCatchments} catchments in ${totalTimeSeconds.toFixed(2)} seconds. Avg time: ${(totalStats.totalTime / totalStats.totalCatchments).toFixed(2)} ms, Avg upstreams: ${(totalStats.totalUpstreams / totalStats.totalCatchments).toFixed(2)}`, 'success');
+  log(`Time from results vs external timer: ${(totalStats.totalTime / 1000).toFixed(2)} seconds (internal) vs ${totalTimeSeconds.toFixed(2)} seconds (external)`, 'info');
 }
 
 async function selectOutletShortcutBenchmark() {
@@ -1416,7 +1496,10 @@ document.getElementById('btn-shortcut-benchmark').addEventListener('click', () =
   selectOutletShortcutBenchmark();
 });
 document.getElementById('btn-shortcuts').addEventListener('click', () => {
-  prepareSubsetShortcut();
+  prepareSubsetShortcut(false);
+});
+document.getElementById('btn-shortcuts-2').addEventListener('click', () => {
+  prepareSubsetShortcut(true);
 });
 
 // ============================================================
